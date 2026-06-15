@@ -1,5 +1,7 @@
 # Simple GitHub Runner
 
+[![Build](https://github.com/kcoder666/simple-github-runner/actions/workflows/docker-build.yml/badge.svg)](https://github.com/kcoder666/simple-github-runner/actions/workflows/docker-build.yml)
+
 A minimal, containerized [self-hosted GitHub Actions runner](https://docs.github.com/en/actions/hosting-your-own-runners). Build the image once, then spin up one or many **ephemeral** runners that register on startup and clean themselves out of your GitHub UI on shutdown.
 
 ## Features
