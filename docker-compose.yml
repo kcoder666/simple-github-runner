@@ -4,5 +4,5 @@ services:
     restart: always
     environment:
       REPO_URL: "${REPO_URL}"
-      REGISTRATION_TOKEN: "${REGISTRATION_TOKEN}"
+      GITHUB_PAT: "${GITHUB_PAT}"
 
