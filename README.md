@@ -63,8 +63,10 @@ docker run -d --restart always --name github-runner \
 
 | Variable | Description |
 |----------|-------------|
-| `REPO_URL` | Full URL of the repo or org to attach the runner to |
+| `REPO_URL` | Full URL of the repo **or** org to attach the runner to |
 | `GITHUB_PAT` | PAT used to mint a fresh registration token on each startup |
+
+`REPO_URL` accepts either a repo (`.../owner/repo`) or an org (`.../org`). An org URL registers an **org-level** runner that serves every repo in the org; `start.sh` picks the right GitHub API scope automatically.
 
 Because runners are ephemeral, the container exits after completing a job. `--restart always` brings it back up, and `start.sh` mints a new registration token from the PAT to register a fresh job slot.
 
@@ -74,19 +76,29 @@ Copy the env template and fill in your values:
 
 ```bash
 cp .env.example .env
-# edit .env — set REPO_URL and GITHUB_PAT
+# edit .env — set GITHUB_PAT, plus ORG_URL and/or REPO_URL_n
 ```
 
-`docker-compose.yml` reads these via `${REPO_URL}` / `${GITHUB_PAT}`, and Compose auto-loads `.env` (git-ignored). Launch multiple parallel runners:
+One config covers three targeting modes via Compose **profiles**:
 
 ```bash
-docker compose up -d --scale runner=3
+# All repos in an org (scale to N concurrent runners)
+docker compose --profile org up -d --scale org-runner=3
+
+# A specific list of repos (one runner per repo)
+docker compose --profile repos up -d
+
+# Both at once
+docker compose --profile org --profile repos up -d
 ```
 
-Tear everything down (containers deregister via the cleanup trap):
+- **`org` profile** → the `org-runner` service, driven by `ORG_URL`. Use `--scale org-runner=N` for parallelism.
+- **`repos` profile** → one service per repo (`repo-1`, `repo-2`, …), driven by `REPO_URL_1`, `REPO_URL_2`, …. Add more by copying a `repo-*` service in `docker-compose.yml` and a matching `REPO_URL_n` in `.env`. Repos may live under different owners.
+
+Nothing starts without a selected profile, so an unconfigured mode never launches a broken container. Tear everything down (containers deregister via the cleanup trap):
 
 ```bash
-docker compose down
+docker compose --profile org --profile repos down
 ```
 
 > [!TIP]

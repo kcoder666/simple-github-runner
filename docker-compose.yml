@@ -1,8 +1,35 @@
+# One config, multiple targeting modes via Compose profiles:
+#   docker compose --profile org   up -d --scale org-runner=3   # all repos in an org
+#   docker compose --profile repos up -d                        # the listed repos
+#   docker compose --profile org --profile repos up -d          # both at once
+#
+# Add more per-repo runners by copying a repo-* service below and a matching
+# REPO_URL_n in .env. start.sh derives the repo/org API scope from each URL.
+
+x-runner: &runner
+  image: custom-github-runner:latest
+  restart: always
+
 services:
-  runner:
-    image: custom-github-runner:latest
-    restart: always
+  # Org-wide runner: serves every repo in the org. Scale with --scale org-runner=N.
+  org-runner:
+    <<: *runner
+    profiles: ["org"]
     environment:
-      REPO_URL: "${REPO_URL}"
+      REPO_URL: "${ORG_URL}"
       GITHUB_PAT: "${GITHUB_PAT}"
 
+  # Per-repo runners: one service per repo. Copy/extend as needed.
+  repo-1:
+    <<: *runner
+    profiles: ["repos"]
+    environment:
+      REPO_URL: "${REPO_URL_1}"
+      GITHUB_PAT: "${GITHUB_PAT}"
+
+  repo-2:
+    <<: *runner
+    profiles: ["repos"]
+    environment:
+      REPO_URL: "${REPO_URL_2}"
+      GITHUB_PAT: "${GITHUB_PAT}"
