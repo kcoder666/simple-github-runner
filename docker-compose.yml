@@ -1,0 +1,8 @@
+services:
+  runner:
+    image: custom-github-runner:latest
+    restart: always
+    environment:
+      REPO_URL: "${REPO_URL}"
+      REGISTRATION_TOKEN: "${REGISTRATION_TOKEN}"
+

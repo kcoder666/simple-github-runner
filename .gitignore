@@ -1,0 +1,16 @@
+# Environment / secrets — never commit registration tokens or PATs
+.env
+.env.*
+!.env.example
+
+# GitHub Actions runner working data (if running locally outside the container)
+actions-runner/
+_work/
+*.tar.gz
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
