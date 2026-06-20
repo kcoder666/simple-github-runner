@@ -24,16 +24,30 @@ else
 fi
 
 # Mint a short-lived token via the GitHub API (registration-token | remove-token).
+# Fail loudly if gh errors or returns an empty token — otherwise config.sh would
+# run with an empty --token and report a misleading "Bad credentials" (401).
 fetch_token() {
-    gh api -X POST "${API_SCOPE}/actions/runners/$1" -q .token
+    local kind="$1" token
+    if ! token="$(gh api -X POST "${API_SCOPE}/actions/runners/${kind}" -q .token)" || [[ -z "${token}" ]]; then
+        echo "ERROR: could not mint ${kind} for scope '${API_SCOPE}'." >&2
+        echo "       Check GITHUB_PAT permissions (org runners need 'manage_runners:org'" >&2
+        echo "       / 'Self-hosted runners: Read and write'; repo runners need repo Admin)" >&2
+        echo "       and SSO authorization if the org enforces SAML." >&2
+        return 1
+    fi
+    printf '%s' "${token}"
 }
 
 echo "Configuring GitHub Actions Runner (scope: ${API_SCOPE})..."
-./config.sh --url "${REPO_URL}" --token "$(fetch_token registration-token)" --name "$(hostname)" --work "_work" --replace --ephemeral
+# Assign first so `set -e` aborts on a failed token fetch (a failure inside
+# config.sh's argument substitution would not trigger set -e on its own).
+reg_token="$(fetch_token registration-token)"
+./config.sh --url "${REPO_URL}" --token "${reg_token}" --name "$(hostname)" --work "_work" --replace --ephemeral
 
 cleanup() {
     echo "Removing runner..."
-    ./config.sh remove --token "$(fetch_token remove-token)" || true
+    local rm_token
+    rm_token="$(fetch_token remove-token)" && ./config.sh remove --token "${rm_token}" || true
 }
 
 # Trap termination signals to clean up the runner from the GitHub UI.
