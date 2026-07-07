@@ -4,13 +4,21 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Install base dependencies
+# unzip/zip: required by actions such as oven-sh/setup-bun that extract .zip releases
+# wget, tar, xz-utils, build-essential: common tooling many CI actions and installers expect
 RUN apt-get update && apt-get install -y \
         curl \
+        wget \
         sudo \
         jq \
+        unzip \
+        zip \
+        tar \
+        xz-utils \
         ca-certificates \
         gnupg \
         git \
+        build-essential \
         python3 \
         python3-pip \
         python3-venv \
