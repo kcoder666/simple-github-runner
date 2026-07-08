@@ -12,6 +12,16 @@ set -euo pipefail
 
 export GH_TOKEN="${GITHUB_PAT}"
 
+# Container actions (runs.using: "docker") need to reach a Docker daemon. We bind
+# in the host's /var/run/docker.sock (see docker-compose.yml). The socket is owned
+# by root:<host-docker-gid>, which the unprivileged `docker` user can't access by
+# default, so re-group it to the in-container `docker` group (the user's primary
+# group) and grant group read/write. Harmless if no socket is mounted.
+if [[ -S /var/run/docker.sock ]]; then
+    sudo chgrp docker /var/run/docker.sock 2>/dev/null || true
+    sudo chmod g+rw /var/run/docker.sock 2>/dev/null || true
+fi
+
 # Derive the GitHub API scope (org vs repo) from REPO_URL.
 # https://github.com/owner/repo -> repos/owner/repo   (2 path segments)
 # https://github.com/org        -> orgs/org           (1 path segment)

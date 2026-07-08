@@ -9,6 +9,10 @@
 x-runner: &runner
   image: custom-github-runner:latest
   restart: always
+  # Share the host's Docker daemon so container actions (runs.using: "docker")
+  # can build/run their images. start.sh fixes the socket's group perms on boot.
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
 
 services:
   # Org-wide runner: serves every repo in the org. Scale with --scale org-runner=N.

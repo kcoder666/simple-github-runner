@@ -11,6 +11,7 @@ A minimal, containerized [self-hosted GitHub Actions runner](https://docs.github
 - **Ephemeral** runners: each runner accepts one job, then deregisters (clean, stateless CI)
 - Graceful cleanup on `SIGINT`/`SIGTERM` — no orphaned offline runners
 - One-command horizontal scaling via Docker Compose
+- Runs Docker **container actions** (e.g. `appleboy/ssh-action`) via a shared host socket
 
 ## Repository layout
 
@@ -95,7 +96,27 @@ docker compose --profile org --profile repos up -d
 - **`org` profile** → the `org-runner` service, driven by `ORG_URL`. Use `--scale org-runner=N` for parallelism.
 - **`repos` profile** → one service per repo (`repo-1`, `repo-2`, …), driven by `REPO_URL_1`, `REPO_URL_2`, …. Add more by copying a `repo-*` service in `docker-compose.yml` and a matching `REPO_URL_n` in `.env`. Repos may live under different owners.
 
-Nothing starts without a selected profile, so an unconfigured mode never launches a broken container. Tear everything down (containers deregister via the cleanup trap):
+Nothing starts without a selected profile, so an unconfigured mode never launches a broken container.
+
+### Scale runners for a single repo
+
+Scale a repo's **service** with `--scale <service>=N`. Each replica is an independent ephemeral runner, so N replicas run up to N jobs from that repo in parallel:
+
+```bash
+# 3 concurrent runners for repo-1
+docker compose --profile repos up -d --scale repo-1=3
+```
+
+Scale several repos at once by repeating the flag (a service you don't scale defaults to 1):
+
+```bash
+docker compose --profile repos up -d --scale repo-1=3 --scale repo-2=2
+```
+
+> [!TIP]
+> You scale by **service name**, not by repo URL. For clarity, rename the example `repo-*` services in `docker-compose.yml` to something descriptive (e.g. `my-app`) and scale with `--scale my-app=3`.
+
+Tear everything down (containers deregister via the cleanup trap):
 
 ```bash
 docker compose --profile org --profile repos down
@@ -114,10 +135,33 @@ docker compose --profile org --profile repos down
 4. Traps `SIGINT`/`SIGTERM` to mint a remove token and deregister the runner on shutdown
 5. Starts `run.sh` to listen for and execute a job
 
+## Running Docker container actions
+
+Some Actions are **container actions** (`runs.using: "docker"`, e.g. `appleboy/ssh-action`). GitHub runs them by shelling out to `docker build`/`docker run`, so the runner needs a Docker CLI **and** a daemon. Since the runner is itself a container, without this it fails with `docker: command not found`.
+
+This image ships the Docker **CLI** and shares the **host's** Docker daemon via a bind-mounted socket — no Docker-in-Docker:
+
+- `docker-compose.yml` mounts `/var/run/docker.sock` into each runner.
+- `start.sh` re-groups the socket on boot so the unprivileged `docker` user can use it.
+
+The single-runner `docker run` in step 3 does **not** mount the socket. If that runner must execute container actions, add the mount yourself:
+
+```bash
+docker run -d --restart always --name github-runner \
+  -e REPO_URL="https://github.com/<username>/<repo_name>" \
+  -e GITHUB_PAT="<github-pat>" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  custom-github-runner:latest
+```
+
+> [!WARNING]
+> Sharing the host socket gives every job on the runner **root-equivalent control of the host Docker daemon** (any container, any host path). Only run trusted workflows on these runners. Note that `docker` commands *inside* a workflow's remote deploy scripts (run over SSH on another host) are unrelated to this — the socket is only needed to launch the container action itself.
+
 ## Security notes
 
 - Never commit registration tokens, PATs, or `.env` files — inject secrets at runtime
 - The `docker` user has passwordless `sudo` inside the container; only run trusted workflows
+- The mounted Docker socket grants host-daemon (root-equivalent) access — keep these runners to trusted workflows, or drop the socket mount for jobs that don't use container actions
 - Self-hosted runners on **public** repositories are risky — forked PRs can run arbitrary code. Prefer private repos, or restrict workflow triggers accordingly
 - Ephemeral runners reduce state-leakage between jobs; pair with a fresh container per job for stronger isolation
 
