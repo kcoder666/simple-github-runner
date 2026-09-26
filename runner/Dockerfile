@@ -79,12 +79,21 @@ RUN useradd -m docker && usermod -aG sudo docker && echo "docker ALL=(ALL) NOPAS
 USER docker
 WORKDIR /home/docker/actions-runner
 
-# Download and extract the GitHub Actions runner (verify latest version on GitHub)
+# Download and extract the GitHub Actions runner for the build host's arch.
+# The controller rebuilds this image with the latest RUNNER_VERSION automatically
+# (GitHub stops routing jobs to runners that fall too far behind a release).
+# Arch comes from dpkg rather than TARGETARCH so legacy (non-BuildKit) builds work.
 ARG RUNNER_VERSION="2.335.1"
-RUN curl -o actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz -L \
-https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
-&& tar xzf ./actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
-&& rm actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz
+LABEL ghr.runner_version="${RUNNER_VERSION}"
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) arch=x64 ;; \
+        arm64) arch=arm64 ;; \
+        *) echo "unsupported arch: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o runner.tar.gz \
+        "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${arch}-${RUNNER_VERSION}.tar.gz" \
+    && tar xzf runner.tar.gz \
+    && rm runner.tar.gz
 
 # Install execution dependencies
 RUN sudo ./bin/installdependencies.sh
