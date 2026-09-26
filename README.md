@@ -107,6 +107,21 @@ All of these can be changed live under **System → Settings**:
 > [!WARNING]
 > Pruning acts on the **whole Docker host**, not just runner images: it removes build cache, dangling images, and (by default) images unused for 7 days. That is what you want on a dedicated runner host. If the host runs other workloads, raise `prune_unused_images_hours` or set it to `0`.
 
+## Publishing the dashboard with Cloudflare Tunnel
+
+The compose file has an optional `tunnel` service (cloudflared). It exposes the dashboard on your own hostname without opening any inbound port:
+
+```bash
+cloudflared tunnel login                                   # pick the zone, e.g. songgen.dev
+cloudflared tunnel create gh-runners
+cloudflared tunnel route dns gh-runners gh-runners.songgen.dev
+echo "CLOUDFLARE_TUNNEL_TOKEN=$(cloudflared tunnel token gh-runners)" >> .env   # on the runner host
+echo "COOKIE_SECURE=true" >> .env
+docker compose --profile tunnel up -d
+```
+
+The dashboard is protected by `ADMIN_PASSWORD`. For per-person logins, add a Cloudflare Access application for the hostname and bypass `/webhook/github` and `/healthz`. With the tunnel up, the GitHub webhook URL is `https://gh-runners.songgen.dev/webhook/github`.
+
 ## Operations
 
 ```bash

@@ -30,5 +30,20 @@ services:
       driver: json-file
       options: { max-size: "20m", max-file: "3" }
 
+  # Optional: publish the dashboard through a Cloudflare Tunnel (no inbound
+  # ports). Set CLOUDFLARE_TUNNEL_TOKEN in .env, route a hostname to the tunnel,
+  # then: docker compose --profile tunnel up -d
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --url http://controller:8080
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+    depends_on: [controller]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
 volumes:
   controller-data:

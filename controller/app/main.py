@@ -315,8 +315,10 @@ def healthz() -> JSONResponse:
 
 
 @app.get("/metrics")
-def metrics() -> PlainTextResponse:
-    """Prometheus exposition. Contains target names and counts only — no secrets."""
+def metrics(request: Request) -> PlainTextResponse:
+    """Prometheus exposition (target names and counts). Needs auth unless METRICS_PUBLIC=true."""
+    if os.environ.get("METRICS_PUBLIC", "").lower() not in ("1", "true"):
+        require_auth(request)
     lines = [
         "# HELP ghr_runners Runners per target and state.",
         "# TYPE ghr_runners gauge",
