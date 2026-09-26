@@ -28,7 +28,7 @@ jobs:
           python -m pytest -q
 
       - name: Lint shell scripts
-        run: shellcheck runner/start.sh rebuild.sh
+        run: shellcheck runner/start.sh rebuild.sh scripts/*.sh
 
   build:
     runs-on: ubuntu-latest

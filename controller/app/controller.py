@@ -82,6 +82,9 @@ class Controller:
         """Import ORG_URL / REPO_URL_n from the old compose .env on first boot."""
         if self.store.kv_get("seeded"):
             return
+        if os.environ.get("SKIP_ENV_IMPORT", "").lower() in ("1", "true", "yes"):
+            self.store.kv_set("seeded", True)
+            return
         urls = ([self.env.seed_org_url] if self.env.seed_org_url else []) + self.env.seed_repo_urls()
         existing = {t["url"] for t in self.store.list_targets()}
         for url in urls:

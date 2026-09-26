@@ -127,6 +127,10 @@ class DockerOps:
         except ImageNotFound:
             return None
         labels = img.labels or {}
+        if not labels.get("ghr.runner_version"):
+            # A pre-controller image (no JIT support in start.sh). Report it as
+            # missing so nothing spawns on it and it gets rebuilt.
+            return None
         return {
             "id": img.id,
             "tag": self.image,

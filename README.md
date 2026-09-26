@@ -132,14 +132,24 @@ If GitHub's API is unreachable, health decisions pause rather than killing healt
 
 ### Migrating from the compose-profile setup
 
+Migrate without interrupting running jobs:
+
 ```bash
-docker compose --profile org --profile repos down   # stop the old runners (before pulling!)
 git pull
-echo "ADMIN_PASSWORD=<something-strong>" >> .env    # keep GITHUB_PAT, ORG_URL, REPO_URL_n as they are
-docker compose up -d --build
+sudo ./scripts/migrate-from-compose.sh
 ```
 
-`ORG_URL` and `REPO_URL_n` are imported as targets (min idle 1, max 4) on first boot. Adjust them in the dashboard afterwards.
+The script does the following:
+1. Records the old `org-runner` / `repo-N` services and their replica counts.
+2. Builds the new runner image and starts the controller.
+3. Creates one target per service, with max = the old replica count and min idle 2.
+4. Waits for the new runners to come online.
+5. **Drains** the old runners. Idle ones stop now; busy ones finish their current job and exit.
+6. Restores the Docker socket's group and deletes the old runners' stale GitHub records.
+
+If jobs are still running after 3 hours, it stops waiting. Finish later with `sudo ./scripts/migrate-from-compose.sh cleanup`.
+
+On a shared host it also turns off pruning of unused images; pass `KEEP_UNUSED_IMAGES=0` to keep it on.
 
 ### Standalone runner (no controller)
 
@@ -162,7 +172,7 @@ docker run -d --restart always -e REPO_URL=https://github.com/<owner>/<repo> -e 
 ## Security
 
 - **The Docker socket is root on the host.** The controller needs it. Runners get it only if their target has *Docker socket* enabled, and then any workflow on that target can control the host. Only enable it for trusted repos.
-- **Keep the dashboard private.** It controls the Docker host. Put it behind a VPN or an HTTPS reverse proxy, and set `COOKIE_SECURE=true` when served over HTTPS. If `ADMIN_PASSWORD` is unset, a random one is generated and printed to the controller log.
+- **Keep the dashboard private.** It controls the Docker host, and it binds to `127.0.0.1` by default (use `ssh -L 8080:127.0.0.1:8080 <host>`). To expose it, set `DASHBOARD_BIND=0.0.0.0`, but only behind a VPN or an HTTPS reverse proxy, and set `COOKIE_SECURE=true` when served over HTTPS. If `ADMIN_PASSWORD` is unset, a random one is generated and printed to the controller log.
 - **Credentials stay in the controller.** Job containers receive only a single-use JIT config, which is removed from the environment before any job runs.
 - **Public repos are risky.** Forked PRs can run arbitrary code on self-hosted runners. Prefer private repos.
 - The runner user has passwordless `sudo` inside its container. Ephemeral containers limit the blast radius between jobs.

@@ -15,8 +15,11 @@ services:
     env_file: .env
     environment:
       RUNNER_IMAGE: "${RUNNER_IMAGE:-custom-github-runner:latest}"
+      SKIP_ENV_IMPORT: "${SKIP_ENV_IMPORT:-}"
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      # Localhost only by default (reach it over an SSH tunnel). Set
+      # DASHBOARD_BIND=0.0.0.0 only behind a firewall / TLS reverse proxy.
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8080}:8080"
     volumes:
       # Controls the host Docker daemon to create runner containers and build
       # the runner image. Root-equivalent — keep the dashboard off the internet
