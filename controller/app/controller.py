@@ -203,6 +203,13 @@ class Controller:
                           s: dict[str, Any], now: float, seen: set[str]) -> list[dict[str, Any]]:
         scope = parse_scope(t["url"])
         prefix = self._name_prefix(t)
+        if not t["enabled"] and not containers:
+            # Fully drained: nothing to manage, so don't spend API calls (or
+            # log permission errors) on a target someone switched off.
+            self.target_status[t["id"]] = {"gh_ok": None, "gh_error": None, "counts": {"live": 0},
+                                           "demand": 0, "backoff_until": None,
+                                           "image_missing": image is None, "reconciled_at": now}
+            return []
         gh_ok, gh_error, records = True, None, {}
         try:
             records = {r["name"]: r for r in self.gh.list_runners(scope) if r["name"].startswith(prefix)}
