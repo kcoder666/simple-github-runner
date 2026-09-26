@@ -81,7 +81,9 @@ fi
 cleanup() {
     echo "Removing runner..."
     local rm_token
-    rm_token="$(fetch_token remove-token)" && ./config.sh remove --token "${rm_token}" || true
+    if rm_token="$(fetch_token remove-token)"; then
+        ./config.sh remove --token "${rm_token}" || true
+    fi
 }
 
 # Trap termination signals to clean up the runner from the GitHub UI.
