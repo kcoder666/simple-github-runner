@@ -61,8 +61,13 @@ delete_stale_records() {
     for url in "$@"; do
         scope="${url#https://github.com/}"; scope="${scope%/}"
         if [[ "${scope}" == */* ]]; then scope="repos/${scope}"; else scope="orgs/${scope}"; fi
-        curl -fsS -H "Authorization: Bearer ${pat}" -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/${scope}/actions/runners?per_page=100" |
+        # A PAT without org permissions gets 403 on org scopes; skip, don't abort.
+        if ! listing="$(curl -fsS -H "Authorization: Bearer ${pat}" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/${scope}/actions/runners?per_page=100" 2>/dev/null)"; then
+            echo "   ${scope}: cannot list runners with this credential — skipped"
+            continue
+        fi
+        printf '%s' "${listing}" |
         python3 -c '
 import json, re, sys
 for r in json.load(sys.stdin)["runners"]:
