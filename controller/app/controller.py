@@ -448,13 +448,17 @@ class Controller:
         repo = (payload.get("repository") or {}).get("full_name", "").lower()
         owner = repo.split("/")[0]
         wanted = {label.lower() for label in job.get("labels", [])}
+        candidates = []
         for t in self.store.list_targets():
             if not t["enabled"]:
                 continue
             try:
-                scope = parse_scope(t["url"])
+                candidates.append((t, parse_scope(t["url"])))
             except ValueError:
                 continue
+        # A repo's own pool beats an org-wide pool that could also take the job.
+        candidates.sort(key=lambda c: c[1].kind != "repos")
+        for t, scope in candidates:
             if (scope.kind == "repos" and scope.path.lower() != repo) or \
                (scope.kind == "orgs" and scope.owner.lower() != owner):
                 continue

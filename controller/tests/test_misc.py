@@ -76,3 +76,17 @@ def test_webhook_org_target_and_label_mismatch(tmp_path):
     assert Controller.on_workflow_job(fake, _job("queued", repo="acme/x")) == "queued for org"
     assert Controller.on_workflow_job(fake, _job("queued", 2, labels=("ubuntu-latest",))) == "no matching target"
     assert Controller.on_workflow_job(fake, _job("queued", 3, repo="other/x")) == "no matching target"
+
+
+def test_webhook_prefers_repo_target_over_org(tmp_path):
+    # "CremiAI" sorts before the repo target, but the repo's own pool should win.
+    fake = _fake_controller(tmp_path, [
+        {"name": "CremiAI", "url": "https://github.com/CremiAI"},
+        {"name": "frontend", "url": "https://github.com/CremiAI/frontend"},
+    ])
+    assert Controller.on_workflow_job(fake, _job("queued", repo="CremiAI/frontend")) == "queued for frontend"
+    # Other repos in the org still go to the org pool.
+    assert Controller.on_workflow_job(fake, _job("queued", 2, repo="CremiAI/other")) == "queued for CremiAI"
+    # The org and repo webhooks both deliver the same job: counted once.
+    Controller.on_workflow_job(fake, _job("queued", repo="CremiAI/frontend"))
+    assert sum(1 for tid, _ in fake.demand.values() if tid == 2) == 1
