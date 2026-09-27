@@ -93,7 +93,13 @@ $("#login-form").addEventListener("submit", async e => {
     start();
   } catch (err) { $("#login-error").textContent = err.message; }
 });
-$("#logout").addEventListener("click", async () => { await api("/api/logout", { method: "POST" }); showLogin(); });
+let me = null;
+$("#logout").addEventListener("click", async () => {
+  await api("/api/logout", { method: "POST" });
+  // Behind Cloudflare Access, also end the Access session or we'd be let straight back in.
+  if (me?.logout_url) { location.href = me.logout_url; return; }
+  showLogin();
+});
 
 // ---------- tabs ----------
 $$("#tabs button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
@@ -107,6 +113,10 @@ function switchTab(tab) {
 async function start() {
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
+  try {
+    me = await api("/api/whoami");
+    $("#whoami").textContent = me.method === "cloudflare-access" ? me.actor : "";
+  } catch { /* shown as logged-out by api() */ }
   switchTab(currentTab);
   await refresh();
   clearInterval(pollTimer);
@@ -383,7 +393,7 @@ function renderEvents(el) {
       ${state.events.length ? state.events.map(ev => `<div class="event">
         <span class="when" title="${esc(fmtTime(ev.ts))}">${esc(new Date(ev.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }))}</span>
         <span><span class="pill ${ev.level === "error" ? "err" : ev.level === "warn" ? "warn" : "info"}">${esc(ev.kind)}</span></span>
-        <span>${esc(ev.message)}${ev.runner ? ` <span class="runner">${esc(ev.runner)}</span>` : ""}</span>
+        <span>${esc(ev.message)}${ev.runner ? ` <span class="runner">${esc(ev.runner)}</span>` : ""}${ev.actor ? ` <span class="pill" title="who did this">${esc(ev.actor)}</span>` : ""}</span>
       </div>`).join("") : `<div class="empty">No events.</div>`}
     </div>`;
   $("#f-et").onchange = e => { filters.eventTarget = e.target.value; e.target.blur(); state.events = null; render(); };

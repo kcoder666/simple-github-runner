@@ -122,7 +122,15 @@ echo "COOKIE_SECURE=true" >> .env
 docker compose --profile tunnel up -d
 ```
 
-The dashboard is protected by `ADMIN_PASSWORD`. For per-person logins, add a Cloudflare Access application for the hostname and bypass `/webhook/github` and `/healthz`. With the tunnel up, the GitHub webhook URL is `https://gh-runners.songgen.dev/webhook/github`.
+The dashboard is protected by `ADMIN_PASSWORD` by default. For per-person logins, put it behind **Cloudflare Access**:
+
+1. Create a self-hosted Access application for the hostname. For example: allow emails ending in `@yourcompany.com`, and log in with a one-time email code.
+2. Add **Bypass** applications for `/webhook/github` and `/healthz`, so GitHub and uptime checks still get through.
+3. Set `CF_ACCESS_TEAM_DOMAIN` (e.g. `yourteam.cloudflareaccess.com`) and `CF_ACCESS_AUD` (the application's audience tag) in `.env`, then run `docker compose up -d controller`.
+
+The controller verifies Cloudflare's signed token on every API request:
+- An Access user skips the shared password, and the event log records who made each change.
+- `ADMIN_PASSWORD` still works over an SSH tunnel and as a Bearer token for scripts. With the tunnel up, the GitHub webhook URL is `https://gh-runners.songgen.dev/webhook/github`.
 
 ## Notifications
 

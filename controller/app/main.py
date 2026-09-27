@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -23,7 +24,8 @@ from .config import DEFAULT_SETTINGS, Env
 from .controller import Controller
 from .github import parse_scope
 from .notify import mask_config, merge_secrets, validate_config
-from .store import Store
+from .access import AccessVerifier
+from .store import Store, current_actor
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -80,12 +82,46 @@ def _valid_session(token: str | None) -> bool:
         return False
 
 
-def require_auth(request: Request) -> None:
+access = (AccessVerifier(env.cf_access_team_domain, env.cf_access_aud)
+          if env.cf_access_team_domain and env.cf_access_aud else None)
+
+
+def _identify(request: Request) -> tuple[str | None, str | None]:
+    """(actor, method) for the request, or (None, None) if unauthenticated."""
+    if access:
+        token = request.headers.get("cf-access-jwt-assertion") or request.cookies.get("CF_Authorization")
+        email = access.verify(token)
+        if email:
+            return email, "cloudflare-access"
     if _valid_session(request.cookies.get(SESSION_COOKIE)):
-        return
+        return "admin", "password"
     # Bearer ADMIN_PASSWORD for scripts/curl.
     header = request.headers.get("authorization", "")
     if header.startswith("Bearer ") and hmac.compare_digest(header[7:], env.admin_password):
+        return "api", "bearer"
+    return None, None
+
+
+@app.middleware("http")
+async def identity_middleware(request: Request, call_next):
+    actor, method = (None, None)
+    if request.url.path.startswith("/api/"):
+        actor, method = await run_in_threadpool(_identify, request)
+    request.state.actor, request.state.auth_method = actor, method
+    # Events recorded while handling this request are attributed to the actor.
+    token = current_actor.set(actor)
+    try:
+        return await call_next(request)
+    finally:
+        current_actor.reset(token)
+
+
+def require_auth(request: Request) -> None:
+    if getattr(request.state, "actor", None):
+        return
+    actor, method = _identify(request)
+    if actor:
+        request.state.actor, request.state.auth_method = actor, method
         return
     raise HTTPException(401, "not authenticated")
 
@@ -102,6 +138,13 @@ def login(body: Login, response: Response) -> dict:
     response.set_cookie(SESSION_COOKIE, _make_session(), max_age=SESSION_TTL, httponly=True, samesite="strict",
                         secure=os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true"))
     return {"ok": True}
+
+
+@app.get("/api/whoami", dependencies=[Depends(require_auth)])
+def whoami(request: Request) -> dict:
+    via_access = request.state.auth_method == "cloudflare-access"
+    return {"actor": request.state.actor, "method": request.state.auth_method,
+            "logout_url": access.logout_url if via_access and access else None}
 
 
 @app.post("/api/logout")

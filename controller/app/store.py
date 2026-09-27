@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sqlite3
@@ -63,6 +64,10 @@ TARGET_FIELDS = (
     "docker_access", "cpus", "memory", "enabled",
 )
 
+# Who is acting in the current request (email, "admin", ...). None for the
+# controller's own automatic actions. Set by the API middleware.
+current_actor: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_actor", default=None)
+
 # Keep the events table bounded.
 MAX_EVENTS = 20000
 
@@ -75,6 +80,9 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+        columns = {r[1] for r in self._db.execute("PRAGMA table_info(events)")}
+        if "actor" not in columns:
+            self._db.execute("ALTER TABLE events ADD COLUMN actor TEXT")
         self._db.commit()
 
     def _exec(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -187,8 +195,8 @@ class Store:
     def add_event(self, level: str, kind: str, message: str,
                   target_id: int | None = None, runner: str | None = None) -> None:
         cur = self._exec(
-            "INSERT INTO events (ts, level, kind, target_id, runner, message) VALUES (?, ?, ?, ?, ?, ?)",
-            (time.time(), level, kind, target_id, runner, message),
+            "INSERT INTO events (ts, level, kind, target_id, runner, message, actor) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), level, kind, target_id, runner, message, current_actor.get()),
         )
         if cur.lastrowid and cur.lastrowid % 500 == 0:
             self._exec("DELETE FROM events WHERE id <= ?", (cur.lastrowid - MAX_EVENTS,))

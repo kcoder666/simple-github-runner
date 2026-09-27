@@ -41,6 +41,11 @@ class Env:
     # ever share a Docker host or a GitHub org, so they don't reap each other.
     name_prefix: str = field(default_factory=lambda: _env("RUNNER_NAME_PREFIX", "ghr"))
     docker_socket: str = field(default_factory=lambda: _env("DOCKER_SOCKET_PATH", "/var/run/docker.sock"))
+    # Cloudflare Access: team domain (e.g. cremi.cloudflareaccess.com) and the
+    # Access application's audience (AUD) tag. When both are set, a valid Access
+    # login replaces the shared ADMIN_PASSWORD and names the actor in events.
+    cf_access_team_domain: str = field(default_factory=lambda: _env("CF_ACCESS_TEAM_DOMAIN"))
+    cf_access_aud: str = field(default_factory=lambda: _env("CF_ACCESS_AUD"))
     # Public dashboard URL, linked from notifications (e.g. https://gh-runners.example.com).
     public_url: str = field(default_factory=lambda: _env("PUBLIC_URL").rstrip("/"))
     # Seed targets on first boot (compat with the old compose .env).
