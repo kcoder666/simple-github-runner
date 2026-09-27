@@ -44,6 +44,16 @@ CREATE TABLE IF NOT EXISTS events (
     runner    TEXT,
     message   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS channels (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    config     TEXT NOT NULL,
+    min_level  TEXT NOT NULL DEFAULT 'warn',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS events_target ON events(target_id, ts);
 """
@@ -109,6 +119,37 @@ class Store:
     def delete_target(self, target_id: int) -> None:
         self._exec("DELETE FROM targets WHERE id = ?", (target_id,))
 
+    # --- notification channels ------------------------------------------------
+
+    def list_channels(self) -> list[dict[str, Any]]:
+        return [_channel(r) for r in self._query("SELECT * FROM channels ORDER BY id")]
+
+    def get_channel(self, channel_id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM channels WHERE id = ?", (channel_id,))
+        return _channel(rows[0]) if rows else None
+
+    def create_channel(self, name: str, ctype: str, config: dict[str, Any], min_level: str = "warn",
+                       enabled: bool = True) -> dict[str, Any]:
+        now = time.time()
+        cur = self._exec(
+            "INSERT INTO channels (name, type, config, min_level, enabled, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, ctype, json.dumps(config), min_level, int(enabled), now, now),
+        )
+        return self.get_channel(cur.lastrowid)  # type: ignore[return-value]
+
+    def update_channel(self, channel_id: int, name: str, ctype: str, config: dict[str, Any],
+                       min_level: str, enabled: bool) -> dict[str, Any] | None:
+        self._exec(
+            "UPDATE channels SET name = ?, type = ?, config = ?, min_level = ?, enabled = ?, updated_at = ? "
+            "WHERE id = ?",
+            (name, ctype, json.dumps(config), min_level, int(enabled), time.time(), channel_id),
+        )
+        return self.get_channel(channel_id)
+
+    def delete_channel(self, channel_id: int) -> None:
+        self._exec("DELETE FROM channels WHERE id = ?", (channel_id,))
+
     # --- settings ----------------------------------------------------------
 
     def settings(self) -> dict[str, Any]:
@@ -171,4 +212,10 @@ def _target(row: dict[str, Any]) -> dict[str, Any]:
     row["enabled"] = bool(row["enabled"])
     row["docker_access"] = bool(row["docker_access"])
     row["labels"] = [label for label in row["labels"].split(",") if label]
+    return row
+
+
+def _channel(row: dict[str, Any]) -> dict[str, Any]:
+    row["enabled"] = bool(row["enabled"])
+    row["config"] = json.loads(row["config"])
     return row

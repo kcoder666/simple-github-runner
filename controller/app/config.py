@@ -41,6 +41,8 @@ class Env:
     # ever share a Docker host or a GitHub org, so they don't reap each other.
     name_prefix: str = field(default_factory=lambda: _env("RUNNER_NAME_PREFIX", "ghr"))
     docker_socket: str = field(default_factory=lambda: _env("DOCKER_SOCKET_PATH", "/var/run/docker.sock"))
+    # Public dashboard URL, linked from notifications (e.g. https://gh-runners.example.com).
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL").rstrip("/"))
     # Seed targets on first boot (compat with the old compose .env).
     seed_org_url: str = field(default_factory=lambda: _env("ORG_URL"))
 
@@ -92,10 +94,13 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "auto_update_runner": True,
     # Recycle idle runners that are on an outdated image.
     "recycle_outdated": True,
-    # Slack/Discord/generic incoming-webhook URL for alerts (empty = off).
+    # Legacy single alert URL; migrated into a notification channel on startup.
     "notify_webhook_url": "",
     # Minimum seconds between two alerts with the same key.
     "notify_cooldown": 6 * 3600,
+    # Alert when a target sits at max_runners with every runner busy for this
+    # many minutes — jobs are queuing (0 = off).
+    "saturation_alert_minutes": 15,
     # Warn when the credential (PAT) expires within this many days.
     "credential_expiry_warn_days": 14,
     # Max runners spawned per target per cycle (smooths bursts / API usage).

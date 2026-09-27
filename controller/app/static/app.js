@@ -22,8 +22,8 @@ const SETTING_HELP = {
   prune_unused_images_hours: ["Prune unused images older than (h)", "Container-action images pile up; 0 keeps them."],
   auto_update_runner: ["Auto-update runner", "Rebuild the image when actions/runner ships a new release."],
   recycle_outdated: ["Recycle outdated runners", "Replace idle runners that run an older image."],
-  notify_webhook_url: ["Alert webhook URL", "Slack or Discord incoming webhook. Empty disables alerts."],
   notify_cooldown: ["Alert cooldown (s)", "Minimum time between repeats of the same alert."],
+  saturation_alert_minutes: ["Capacity alert after (min)", "Alert when a target has every runner busy at max for this long. 0 disables."],
   credential_expiry_warn_days: ["PAT expiry warning (days)", "Alert when the PAT expires within this many days."],
 };
 
@@ -137,7 +137,7 @@ function render() {
   hb.textContent = c.healthy ? `reconciled ${ago(c.last_cycle_at)}` : "controller unhealthy";
   const section = $(`#tab-${currentTab}`);
   if (editing(section)) return;
-  ({ overview: renderOverview, runners: renderRunners, targets: renderTargets, events: renderEvents, system: renderSystem })[currentTab](section);
+  ({ overview: renderOverview, runners: renderRunners, targets: renderTargets, events: renderEvents, alerts: renderAlerts, system: renderSystem })[currentTab](section);
 }
 
 // ---------- health checks ----------
@@ -170,6 +170,12 @@ function healthChecks() {
     const level = d.free_pct < state.settings.disk_min_free_pct ? "err" : d.free_pct < state.settings.disk_min_free_pct * 1.5 ? "warn" : "ok";
     checks.push([level, "Docker disk", `${d.free_pct}% free · ${bytes(d.free)} of ${bytes(d.total)}`]);
   }
+
+  const chans = (state.channels || []).filter(ch => ch.enabled);
+  const failing = chans.filter(ch => ch.status && !ch.status.ok);
+  checks.push(!chans.length ? ["warn", "Alerts", "No notification channel — add one under Alerts"]
+    : failing.length ? ["err", "Alerts", `${failing.map(ch => ch.name).join(", ")} failing to deliver`]
+    : ["ok", "Alerts", `${chans.length} channel${chans.length > 1 ? "s" : ""}${(state.open_alerts || []).length ? ` · ${state.open_alerts.length} open alert(s)` : " · all quiet"}`]);
 
   const img = state.image;
   if (img.missing) checks.push(["warn", "Runner image", img.build.building ? "building…" : "missing — will be built"]);
@@ -374,6 +380,104 @@ function renderEvents(el) {
   $("#f-el").onchange = e => { filters.eventLevel = e.target.value; e.target.blur(); state.events = null; render(); };
 }
 
+// ---------- alerts ----------
+const CHANNEL_TYPES = {
+  discord: { label: "Discord", fields: [["url", "Webhook URL", "https://discord.com/api/webhooks/…", "Channel → Edit Channel → Integrations → Webhooks → New Webhook → Copy URL."]] },
+  slack: { label: "Slack", fields: [["url", "Webhook URL", "https://hooks.slack.com/services/…", "Create a Slack app with Incoming Webhooks enabled, then add one for the channel."]] },
+  telegram: { label: "Telegram", fields: [
+    ["bot_token", "Bot token", "123456789:AA…", "Create a bot with @BotFather and add it to the group or channel."],
+    ["chat_id", "Chat ID", "-1001234567890", "Group/channel id (or @channelname). Send a message in the chat, then open api.telegram.org/bot<token>/getUpdates to find it."],
+    ["thread_id", "Topic ID (optional)", "", "For forum groups: the topic's message_thread_id."]] },
+  webhook: { label: "Generic webhook", fields: [["url", "URL", "https://example.com/hooks/runners", "Receives a JSON POST: level, title, message, target, runner, resolved, timestamp."]] },
+};
+const LEVEL_LABEL = { info: "Everything (info+)", warn: "Warnings and errors", error: "Errors only" };
+
+function renderAlerts(el) {
+  const chans = state.channels || [];
+  el.innerHTML = `
+    <div class="row spread" style="margin-bottom:12px">
+      <p class="muted" style="margin:0">Get notified when runners crash-loop, wedge, lose GitHub access, fill the disk, or hit capacity — and again when it clears.</p>
+      <button class="btn primary" data-act="new-channel">Add channel</button>
+    </div>
+    <div class="card table-wrap" style="padding:0">
+      ${chans.length ? `<table>
+        <thead><tr><th>Name</th><th>Type</th><th>Destination</th><th>Sends</th><th>Last delivery</th><th>Status</th><th></th></tr></thead>
+        <tbody>${chans.map(c => `<tr>
+          <td><b>${esc(c.name)}</b></td>
+          <td>${esc(CHANNEL_TYPES[c.type]?.label || c.type)}</td>
+          <td class="mono">${esc(c.config.url || [c.config.chat_id, c.config.thread_id && "topic " + c.config.thread_id].filter(Boolean).join(" · "))}</td>
+          <td>${esc(LEVEL_LABEL[c.min_level])}</td>
+          <td>${c.status ? `<span class="pill ${c.status.ok ? "ok" : "err"}" title="${esc(c.status.detail)}">${c.status.ok ? "delivered" : "failed"}</span> <span class="muted">${ago(c.status.at)}</span>${c.status.ok ? "" : `<div class="muted" style="font-size:12px">${esc(c.status.detail)}</div>`}` : `<span class="muted">—</span>`}</td>
+          <td>${c.enabled ? `<span class="pill ok">on</span>` : `<span class="pill">off</span>`}</td>
+          <td class="actions">
+            <button class="btn small" data-act="test-channel" data-cid="${c.id}">Send test</button>
+            <button class="btn small" data-act="edit-channel" data-cid="${c.id}">Edit</button>
+            <button class="btn small danger" data-act="delete-channel" data-cid="${c.id}">Delete</button>
+          </td></tr>`).join("")}</tbody></table>`
+      : `<div class="empty">No channels yet — nobody hears about problems. Add Discord, Slack, Telegram or a webhook.</div>`}
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card">
+        <h2>What triggers an alert</h2>
+        <dl class="kv">
+          <dt>Error</dt><dd>Crash-loop backoff, runners failing to start, GitHub API/credential failures, disk still low after pruning, image build failures, controller stalls</dd>
+          <dt>Warning</dt><dd>Runners replaced (never registered, went offline, hung job, crashed/OOM), low disk, PAT expiring, capacity saturated</dd>
+          <dt>Info</dt><dd>Controller restarts</dd>
+          <dt>Resolved</dt><dd>Sent once when an alerted problem clears, to the same channels that got the alert</dd>
+          <dt>Repeats</dt><dd>The same alert is sent at most once per ${dur(state.settings.notify_cooldown)} (Settings → Alert cooldown)</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <h2>Open alerts</h2>
+        ${(state.open_alerts || []).length ? `<div>${state.open_alerts.map(k => `<span class="tag">${esc(k)}</span>`).join(" ")}</div>
+          <p class="muted" style="font-size:12.5px">Each will send a “Resolved” message when it clears.</p>` : `<p class="muted">None — all quiet.</p>`}
+        ${state.public_url ? "" : `<p class="muted" style="font-size:12.5px">Tip: set <span class="mono">PUBLIC_URL</span> in .env to link alerts to this dashboard.</p>`}
+      </div>
+    </div>`;
+  bindCommon(el);
+}
+
+function channelForm(c) {
+  const type = c?.type || "discord";
+  openModal(c ? `Edit ${c.name}` : "Add notification channel", `
+    <form id="channel-form" class="stack">
+      <div class="form-grid">
+        <label class="field"><span>Name</span><input name="name" value="${esc(c?.name || "")}" required maxlength="60" placeholder="#ci-alerts"></label>
+        <label class="field"><span>Type</span><select name="type">${Object.entries(CHANNEL_TYPES).map(([k, v]) => `<option value="${k}" ${k === type ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
+        <div id="channel-fields" class="wide form-grid"></div>
+        <label class="field"><span>Send</span><select name="min_level">${Object.entries(LEVEL_LABEL).map(([k, v]) => `<option value="${k}" ${k === (c?.min_level || "warn") ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+        <label class="check-field"><input type="checkbox" name="enabled" ${c?.enabled === false ? "" : "checked"}> Enabled</label>
+      </div>
+      ${c ? `<p class="muted" style="font-size:12.5px">Secrets are shown masked; leave them unchanged to keep the stored value.</p>` : ""}
+      <p id="form-error" class="error-text"></p>
+      <div class="row"><button class="btn primary" type="submit">${c ? "Save" : "Add"}</button>${c ? "" : `<button class="btn" type="submit" data-test>Add &amp; send test</button>`}<button class="btn" type="button" data-close>Cancel</button></div>
+    </form>`);
+  const form = $("#channel-form");
+  const drawFields = t => {
+    $("#channel-fields").innerHTML = CHANNEL_TYPES[t].fields.map(([k, label, ph, help]) =>
+      `<label class="field ${k === "url" ? "wide" : ""}"><span>${esc(label)}</span><input name="cfg_${k}" value="${esc(c && c.type === t ? c.config[k] || "" : "")}" placeholder="${esc(ph)}" ${k === "thread_id" ? "" : "required"} autocomplete="off"><small>${esc(help)}</small></label>`).join("");
+  };
+  drawFields(type);
+  form.elements.type.onchange = e => drawFields(e.target.value);
+  let sendTest = false;
+  $$("button[type=submit]", form).forEach(b => b.onclick = () => { sendTest = b.hasAttribute("data-test"); });
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const f = new FormData(form), t = f.get("type"), config = {};
+    for (const [k] of CHANNEL_TYPES[t].fields) config[k] = (f.get("cfg_" + k) || "").trim();
+    const body = { name: f.get("name").trim(), type: t, config, min_level: f.get("min_level"), enabled: f.get("enabled") === "on" };
+    try {
+      const saved = await api(c ? `/api/channels/${c.id}` : "/api/channels", { method: c ? "PUT" : "POST", body });
+      closeModal();
+      if (sendTest) {
+        const r = await api(`/api/channels/${saved.id}/test`, { method: "POST" });
+        toast(r.ok ? "Channel added — test message delivered" : `Added, but the test failed: ${r.detail}`, !r.ok);
+      } else toast(c ? "Channel saved" : "Channel added");
+      refresh();
+    } catch (err) { $("#form-error").textContent = err.message; }
+  });
+}
+
 // ---------- system ----------
 function renderSystem(el) {
   const c = state.controller, img = state.image, d = state.disk, cred = state.github.credentials || {};
@@ -464,6 +568,17 @@ async function act(action, data) {
   try {
     switch (action) {
       case "new-target": return targetForm(null);
+      case "new-channel": return channelForm(null);
+      case "edit-channel": return channelForm(state.channels.find(c => c.id == data.cid));
+      case "test-channel": {
+        const r = await api(`/api/channels/${data.cid}/test`, { method: "POST" });
+        toast(r.ok ? "Test message delivered" : `Test failed: ${r.detail}`, !r.ok); break;
+      }
+      case "delete-channel": {
+        const c = state.channels.find(x => x.id == data.cid);
+        if (!confirm(`Delete notification channel "${c.name}"?`)) return;
+        await api(`/api/channels/${c.id}`, { method: "DELETE" }); toast("Channel deleted"); break;
+      }
       case "edit-target": return targetForm(target);
       case "view-runners": filters.runnerTarget = data.id; filters.runnerState = ""; return switchTab("runners");
       case "toggle-target":

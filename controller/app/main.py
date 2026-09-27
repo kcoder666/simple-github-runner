@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from .config import DEFAULT_SETTINGS, Env
 from .controller import Controller
 from .github import parse_scope
+from .notify import mask_config, merge_secrets, validate_config
 from .store import Store
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -115,6 +116,9 @@ def logout(response: Response) -> dict:
 def state() -> dict:
     snap = controller.snapshot()
     snap["settings"] = store.settings()
+    snap["channels"] = [_channel_out(ch) for ch in store.list_channels()]
+    snap["open_alerts"] = controller.notifier.open_alerts()
+    snap["public_url"] = env.public_url
     snap["now"] = time.time()
     return snap
 
@@ -235,6 +239,71 @@ def runner_logs(name: str, tail: int = 400) -> PlainTextResponse:
     if not name.startswith(f"{env.name_prefix}-"):
         raise HTTPException(404, "not a managed runner")
     return PlainTextResponse(controller.docker.logs(name, min(tail, 5000)))
+
+
+# --- notification channels ---------------------------------------------------------------
+
+class ChannelIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    type: str
+    config: dict[str, Any]
+    min_level: str = Field("warn", pattern=r"^(info|warn|error)$")
+    enabled: bool = True
+
+
+def _channel_out(ch: dict[str, Any]) -> dict[str, Any]:
+    return {**ch, "config": mask_config(ch["config"]), "status": controller.notifier.status.get(ch["id"])}
+
+
+def _validated(body: ChannelIn, old: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = merge_secrets(body.config, old["config"]) if old and old["type"] == body.type else body.config
+    try:
+        return validate_config(body.type, config)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/channels", dependencies=[Depends(require_auth)])
+def list_channels() -> list[dict]:
+    return [_channel_out(ch) for ch in store.list_channels()]
+
+
+@app.post("/api/channels", dependencies=[Depends(require_auth)], status_code=201)
+def create_channel(body: ChannelIn) -> dict:
+    ch = store.create_channel(body.name.strip(), body.type, _validated(body), body.min_level, body.enabled)
+    controller.event("info", "settings", f"notification channel '{ch['name']}' ({ch['type']}) added")
+    return _channel_out(ch)
+
+
+@app.put("/api/channels/{channel_id}", dependencies=[Depends(require_auth)])
+def update_channel(channel_id: int, body: ChannelIn) -> dict:
+    old = store.get_channel(channel_id)
+    if old is None:
+        raise HTTPException(404, "no such channel")
+    ch = store.update_channel(channel_id, body.name.strip(), body.type, _validated(body, old),
+                              body.min_level, body.enabled)
+    controller.event("info", "settings", f"notification channel '{body.name}' updated")
+    return _channel_out(ch)  # type: ignore[arg-type]
+
+
+@app.delete("/api/channels/{channel_id}", dependencies=[Depends(require_auth)])
+def delete_channel(channel_id: int) -> dict:
+    ch = store.get_channel(channel_id)
+    if ch is None:
+        raise HTTPException(404, "no such channel")
+    store.delete_channel(channel_id)
+    controller.notifier.status.pop(channel_id, None)
+    controller.event("info", "settings", f"notification channel '{ch['name']}' deleted")
+    return {"ok": True}
+
+
+@app.post("/api/channels/{channel_id}/test", dependencies=[Depends(require_auth)])
+def test_channel(channel_id: int) -> dict:
+    ch = store.get_channel(channel_id)
+    if ch is None:
+        raise HTTPException(404, "no such channel")
+    ok, detail = controller.notifier.send_test(ch)
+    return {"ok": ok, "detail": detail}
 
 
 # --- system ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ from docker.errors import APIError, DockerException
 from .config import Env
 from .docker_ops import DockerOps
 from .github import GitHub, GitHubError, Scope, parse_scope, version_tuple
-from .notify import Notifier
+from .notify import Notifier, validate_config
 from .planner import Action, RunnerView, plan
 from .store import Store
 
@@ -47,7 +47,7 @@ class Controller:
         self.store = store
         self.gh = GitHub(env.github_api_url, env.github_pat, env.github_app_id, env.github_app_private_key)
         self.docker = DockerOps(env.runner_image, env.runner_build_context, env.docker_socket)
-        self.notifier = Notifier()
+        self.notifier = Notifier(store, env.public_url)
         self.wake = threading.Event()
         self._cycle_lock = threading.Lock()
         self.started_at = time.time()
@@ -68,12 +68,16 @@ class Controller:
         self._last_cred_check = 0.0
         self._last_version_check = 0.0
         self._last_emergency_prune = 0.0
+        self.saturated_since: dict[int, float] = {}
+        self.saturation_alerted: set[int] = set()
         self.base_labels = ["self-hosted", "linux", self._arch()]
 
     # --- lifecycle -------------------------------------------------------------------
 
     def start(self) -> None:
         self.seed_targets()
+        self.migrate_legacy_notify_url()
+        self.notifier.info("controller", "Controller started.")
         for fn, name in ((self._reconcile_loop, "reconcile"), (self._housekeeping_loop, "housekeeping"),
                          (self._watchdog_loop, "watchdog")):
             threading.Thread(target=fn, name=name, daemon=True).start()
@@ -108,15 +112,34 @@ class Controller:
         return "arm64" if arch in ("aarch64", "arm64") else "x64"
 
     def event(self, level: str, kind: str, message: str, target_id: int | None = None,
-              runner: str | None = None, alert_key: str | None = None) -> None:
+              runner: str | None = None, alert_key: str | None = None, resolves: str | None = None) -> None:
+        """Log + record an event. alert_key notifies channels; resolves closes an earlier alert."""
         getattr(log, "warning" if level == "warn" else level)("[%s] %s%s", kind,
                                                                f"{runner}: " if runner else "", message)
         self.store.add_event(level, kind, message, target_id, runner)
+        if not (alert_key or resolves):
+            return
+        target = self.store.get_target(target_id) if target_id is not None else None
+        name = target["name"] if target else None
+        text = message[len(name) + 2:] if name and message.startswith(f"{name}: ") else message
         if alert_key:
-            s = self.store.settings()
-            prefix = {"error": "🔴", "warn": "🟠"}.get(level, "🟢")
-            self.notifier.send(s["notify_webhook_url"], alert_key, f"{prefix} [github-runners] {message}",
-                               s["notify_cooldown"])
+            self.notifier.alert(level, kind, text, alert_key, target=name, runner=runner)
+        if resolves:
+            self.notifier.resolve(resolves, text, target=name)
+
+    def migrate_legacy_notify_url(self) -> None:
+        """Turn the old single notify_webhook_url setting into a channel."""
+        url = self.store.settings().get("notify_webhook_url")
+        if not url:
+            return
+        ctype = "discord" if "discord" in url else "slack" if "hooks.slack.com" in url else "webhook"
+        try:
+            config = validate_config(ctype, {"url": url})
+        except ValueError:
+            ctype, config = "webhook", {"url": url}
+        self.store.create_channel(f"{ctype} (migrated)", ctype, config, "warn")
+        self.store.update_settings({"notify_webhook_url": ""})
+        log.info("migrated notify_webhook_url into a %s notification channel", ctype)
 
     # --- loops ---------------------------------------------------------------------
 
@@ -130,6 +153,8 @@ class Controller:
                 self.event("error", "controller", f"reconcile cycle failed: {self.last_cycle_error}",
                            alert_key="reconcile-failed")
                 self.last_cycle_at = time.time()  # the loop itself is alive
+            else:
+                self.notifier.resolve("reconcile-failed", "Reconcile cycles are succeeding again.")
             self.wake.wait(timeout=self.store.settings()["reconcile_interval"] or 20)
             self.wake.clear()
 
@@ -150,7 +175,10 @@ class Controller:
             if time.time() - last > limit:
                 log.critical("reconcile loop stalled for %ss — exiting so Docker restarts the controller",
                              int(time.time() - last))
-                self.store.add_event("error", "controller", "reconcile loop stalled; controller restarting")
+                self.event("error", "controller",
+                           f"Reconcile loop stalled for {int(time.time() - last)}s — restarting the controller.",
+                           alert_key="watchdog")
+                self.notifier.flush()
                 os._exit(1)
 
     def healthy(self) -> tuple[bool, str]:
@@ -219,6 +247,10 @@ class Controller:
             if prev.get("gh_ok", True):
                 self.event("error", "github", f"{t['name']}: cannot list runners — {exc.message}",
                            t["id"], alert_key=f"gh-list-{t['id']}")
+        else:
+            if self.target_status.get(t["id"], {}).get("gh_ok") is False:
+                self.event("info", "github", f"{t['name']}: GitHub API reachable again", t["id"],
+                           resolves=f"gh-list-{t['id']}")
 
         views: list[RunnerView] = []
         for c in containers:
@@ -258,6 +290,7 @@ class Controller:
             except (GitHubError, DockerException) as exc:
                 self.event("error", "action", f"{action.kind} failed: {exc}", t["id"], action.name)
 
+        self._check_saturation(t, p.counts, gh_ok, demand, s, now)
         self.target_status[t["id"]] = {
             "gh_ok": gh_ok, "gh_error": gh_error, "counts": p.counts, "demand": demand,
             "backoff_until": blocked_until if blocked_until > now else None,
@@ -270,6 +303,27 @@ class Controller:
             "target_id": t["id"],
             "target_name": t["name"],
         } for v in views]
+
+    def _check_saturation(self, t: dict[str, Any], counts: dict[str, int], gh_ok: bool, demand: int,
+                          s: dict[str, Any], now: float) -> None:
+        """Alert when a target is pinned at max_runners with every runner busy: jobs are queuing."""
+        busy = counts.get("busy", 0) + counts.get("stuck", 0)
+        saturated = (t["enabled"] and gh_ok and t["max_runners"] > 0 and busy >= t["max_runners"])
+        key = f"capacity-{t['id']}"
+        if not saturated:
+            self.saturation_alerted.discard(t["id"])
+            if self.saturated_since.pop(t["id"], None) is not None:
+                self.notifier.resolve(key, "Free runner capacity again — no longer saturated.", t["name"])
+            return
+        since = self.saturated_since.setdefault(t["id"], now)
+        minutes = s.get("saturation_alert_minutes", 0)
+        if minutes and now - since >= minutes * 60 and t["id"] not in self.saturation_alerted:
+            self.saturation_alerted.add(t["id"])
+            queued = f" ({demand} job(s) known to be queued)" if demand else ""
+            self.event("warn", "capacity",
+                       f"{t['name']}: all {t['max_runners']} runners busy for {int((now - since) // 60)} min — "
+                       f"jobs are queuing{queued}. Raise max runners if this is sustained.",
+                       t["id"], alert_key=key)
 
     def _name_prefix(self, t: dict[str, Any]) -> str:
         return f"{self.env.name_prefix}-{t['id']}-"
@@ -370,9 +424,10 @@ class Controller:
 
     def _clear_backoff(self, t: dict[str, Any]) -> None:
         if self.backoff.pop(t["id"], None):
-            self.event("info", "backoff", f"{t['name']}: runner came online — backoff cleared", t["id"])
+            self.event("info", "backoff", f"{t['name']}: runner came online — backoff cleared", t["id"],
+                       resolves=f"backoff-{t['id']}")
         self.failures.pop(t["id"], None)
-        self.notifier.reset(f"backoff-{t['id']}")
+        self.notifier.resolve(f"spawn-{t['id']}", "Runners are starting and registering again.", t["name"])
 
     def reset_backoff(self, target_id: int) -> None:
         self.backoff.pop(target_id, None)
@@ -450,8 +505,7 @@ class Controller:
                 self.event("error", "credentials", f"GitHub credential check failed: {cred.get('error')}",
                            alert_key="credentials")
         elif prev and not prev.get("ok", True):
-            self.event("info", "credentials", "GitHub credentials are valid again")
-            self.notifier.reset("credentials")
+            self.event("info", "credentials", "GitHub credentials are valid again", resolves="credentials")
         expires = cred.get("expires_at")
         if expires:
             days = (expires - time.time()) / 86400
@@ -465,6 +519,9 @@ class Controller:
         disk = self.docker.disk_usage()
         disk["checked_at"] = now
         self.system["disk"] = disk
+        if disk["free_pct"] >= s["disk_min_free_pct"]:
+            for key in ("disk-low", "disk-critical"):
+                self.notifier.resolve(key, f"Docker disk back to {disk['free_pct']}% free.")
         if disk["free_pct"] < s["disk_min_free_pct"] and now - self._last_emergency_prune > EMERGENCY_PRUNE_EVERY:
             self._last_emergency_prune = now
             self.event("warn", "disk", f"Docker disk is {100 - disk['free_pct']:.0f}% full — pruning aggressively",
@@ -507,6 +564,7 @@ class Controller:
         ok, output = self.docker.build_image(latest or current)
         if ok:
             new = self.docker.image_info()
+            self.notifier.resolve("image-build", "Runner image built successfully.")
             self.event("info", "image", f"built runner image ({(new or {}).get('runner_version')}); "
                        "idle runners will be recycled onto it")
             self.wake.set()

@@ -24,7 +24,8 @@ Self-hosted GitHub Actions runners that **look after themselves**. One small con
 - **Disk hygiene** — scheduled pruning of build cache and container-action images, with an emergency prune when free space runs low.
 - **Credential monitoring** — shows PAT expiry and alerts before it lapses; supports GitHub App auth, which never expires.
 - **Dashboard** — targets, live runners (logs, recycle, kill), event history, settings, image and disk controls.
-- **Alerts and observability** — Slack/Discord webhook alerts, `/healthz`, Prometheus `/metrics`, and a watchdog that restarts the controller if its loop stalls.
+- **Notifications** — Discord, Slack, Telegram and generic-webhook channels with per-channel severity, a "Resolved" message when a problem clears, and capacity-saturation alerts.
+- **Observability** — `/healthz`, Prometheus `/metrics`, and a watchdog that restarts the controller if its loop stalls.
 
 ## Why runners got stuck every month (and what handles each)
 
@@ -102,7 +103,8 @@ All of these can be changed live under **System → Settings**:
 | `prune_interval_hours` | 24 | Scheduled prune |
 | `prune_unused_images_hours` | 168 | Also prune unused images older than this |
 | `auto_update_runner` | on | Rebuild on new `actions/runner` releases |
-| `notify_webhook_url` | — | Slack or Discord incoming webhook for alerts |
+| `notify_cooldown` | 6 h | Minimum time between repeats of the same alert |
+| `saturation_alert_minutes` | 15 | Alert when a target has every runner busy at max for this long |
 
 > [!WARNING]
 > Pruning acts on the **whole Docker host**, not just runner images: it removes build cache, dangling images, and (by default) images unused for 7 days. That is what you want on a dedicated runner host. If the host runs other workloads, raise `prune_unused_images_hours` or set it to `0`.
@@ -121,6 +123,29 @@ docker compose --profile tunnel up -d
 ```
 
 The dashboard is protected by `ADMIN_PASSWORD`. For per-person logins, add a Cloudflare Access application for the hostname and bypass `/webhook/github` and `/healthz`. With the tunnel up, the GitHub webhook URL is `https://gh-runners.songgen.dev/webhook/github`.
+
+## Notifications
+
+Add channels under **Alerts → Add channel**. Each channel has its own severity filter (everything, warnings and errors, or errors only) and a **Send test** button.
+
+| Type | What you need |
+|---|---|
+| Discord | Channel → Edit Channel → Integrations → Webhooks → New Webhook → copy the URL |
+| Slack | A Slack app with Incoming Webhooks enabled; add a webhook for the channel |
+| Telegram | A bot from @BotFather, added to your group or channel, plus the chat ID (and optionally a forum topic ID) |
+| Generic webhook | Any URL. It receives JSON with `level`, `title`, `message`, `target`, `runner`, `resolved`, `timestamp` and `dashboard_url` |
+
+| Severity | Sent for |
+|---|---|
+| Error | Crash-loop backoff, runners failing to start, GitHub API or credential failures, disk still low after pruning, image build failures, controller stalls |
+| Warning | Runners replaced (never registered, went offline, hung job, crashed or OOM-killed), low disk, PAT expiring, capacity saturated (all runners busy at max) |
+| Info | Controller (re)started |
+
+Other behaviour:
+- The same alert repeats at most once per `notify_cooldown`.
+- When an alerted problem clears, a single **Resolved** message goes to the same channels.
+- Set `PUBLIC_URL` (e.g. `https://gh-runners.example.com`) to link alerts to the dashboard.
+- Channel secrets are stored in the controller database and shown masked in the dashboard.
 
 ## Operations
 
