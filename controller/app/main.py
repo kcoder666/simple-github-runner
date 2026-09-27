@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -417,6 +417,21 @@ def metrics(request: Request) -> PlainTextResponse:
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+def _asset_version() -> str:
+    digest = hashlib.sha256()
+    for name in ("app.js", "style.css"):
+        with open(os.path.join(STATIC, name), "rb") as f:
+            digest.update(f.read())
+    return digest.hexdigest()[:12]
+
+
+# Asset URLs carry a content hash so browsers and Cloudflare never pair a new
+# page with a stale cached script after a deploy.
+INDEX_HTML = open(os.path.join(STATIC, "index.html")).read().replace(
+    "/static/app.js", f"/static/app.js?v={_asset_version()}").replace(
+    "/static/style.css", f"/static/style.css?v={_asset_version()}")
+
+
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(os.path.join(STATIC, "index.html"))
+def index() -> HTMLResponse:
+    return HTMLResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})

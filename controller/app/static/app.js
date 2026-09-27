@@ -117,9 +117,17 @@ async function refresh() {
   try {
     state = await api("/api/state");
     if (currentTab === "events") state.events = await api(eventsUrl());
-    render();
   } catch (err) {
     if (err.message !== "not authenticated") $("#heartbeat").outerHTML = `<span id="heartbeat" class="pill err">offline</span>`;
+    return;
+  }
+  try {
+    render();
+  } catch (err) {
+    // A rendering bug (or a stale cached script) is not "offline" — say what happened.
+    console.error(err);
+    $(`#tab-${currentTab}`).innerHTML = `<div class="card empty">This view failed to render (${esc(err.message)}).
+      <br><a href="#" onclick="location.reload(); return false">Reload the page</a> — if it persists, report it.</div>`;
   }
 }
 
@@ -137,7 +145,9 @@ function render() {
   hb.textContent = c.healthy ? `reconciled ${ago(c.last_cycle_at)}` : "controller unhealthy";
   const section = $(`#tab-${currentTab}`);
   if (editing(section)) return;
-  ({ overview: renderOverview, runners: renderRunners, targets: renderTargets, events: renderEvents, alerts: renderAlerts, system: renderSystem })[currentTab](section);
+  const views = { overview: renderOverview, runners: renderRunners, targets: renderTargets, events: renderEvents, alerts: renderAlerts, system: renderSystem };
+  if (!views[currentTab]) return switchTab("overview");
+  views[currentTab](section);
 }
 
 // ---------- health checks ----------
